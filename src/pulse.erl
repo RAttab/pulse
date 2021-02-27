@@ -1,46 +1,41 @@
 -module(pulse).
 
--export([
-    tag/2,
-    tags/0, tags/1, tags/2,
-    gauge/2, gauge/3,
-    count/2, count/3,
-    dist/2, dist/3,
-    collect/1
-]).
+-export([gauge/2, gauge/3, count/2, count/3, summarize/2, summarize/3, dump/1]).
 
-%% -type key() :: atom().
-%% -type tags() :: binary().
+-export_type([key/0, tag_key/0, tag_val/0, tag/0]).
 
-%% -type gauge() :: undefined | {gauge, key(), tags(), number()}.
-%% -type counter() :: undefined | {count, key(), tags(), integer()}.
-%% -type dist() :: undefined | {dist, key(), tags(), number()}.
+-behaviour(application).
 
-tag(Key, Value) when is_binary(Key) andalso is_binary(Value) ->
-    <<$", Key/binary, $", $=, $", Value/binary, $">>.
+-export([start/2, stop/1]).
 
-tags() -> <<>>.
+-type key() :: atom().
+-type tag_key() :: atom().
+-type tag_val() :: atom() | binary() | number().
+-type tag() :: {} | {tag_key(), tag_val()}.
 
-tags(KVs) -> tags(KVs, <<>>).
+-spec gauge(key(), integer()) -> ok.
+gauge(Key, Value) -> pulse_db:write(gauge, Key, Value).
 
-tags([], Tags) ->
-    Tags;
-tags([{Key, Value} | Rest], <<>>) ->
-    tags(Rest, tag(Key, Value));
-tags([{Key, Value} | Rest], Tags) ->
-    tags(Rest, <<Tags/binary, $,, (tag(Key, Value))/binary>>).
+-spec gauge(key(), tag(), integer()) -> ok.
+gauge(Key, Tag, Value) -> pulse_db:write(gauge, Key, Tag, Value).
 
-gauge(Key, Value) -> gauge(Key, tags(), Value).
+-spec count(key(), integer()) -> ok.
+count(Key, Value) -> pulse_db:write(count, Key, Value).
 
-gauge(Key, Tags, Value) -> {gauge, Key, Tags, Value}.
+-spec count(key(), tag(), integer()) -> ok.
+count(Key, Tag, Value) -> pulse_db:write(count, Key, Tag, Value).
 
-count(Key, Value) -> count(Key, tags(), Value).
+-spec summarize(key(), number()) -> ok.
+summarize(Key, Value) -> pulse_db:write(summary, Key, Value).
 
-count(Key, Tags, Value) -> {count, Key, Tags, Value}.
+-spec summarize(key(), tag(), number()) -> ok.
+summarize(Key, Tag, Value) -> pulse_db:write(summary, Key, Tag, Value).
 
-dist(Key, Value) -> dist(Key, tags(), Value).
+-spec dump(binary()) -> iolist().
+dump(Prefix) -> pulse_db:dump(Prefix).
 
-dist(Key, Tags, Value) -> {dist, Key, Tags, Value}.
+-spec start(any(), any()) -> supervisor:startlink_ret().
+start(_, _) -> pulse_sup:start_link().
 
-collect(_Acc) ->
-    ok.
+-spec stop(any()) -> ok.
+stop(_) -> ok.

@@ -1,77 +1,187 @@
 -module(pulse_db).
 
--export([collect/2, report/2]).
+-export([new/0, free/0, write/3, write/4, dump/1]).
 
--record(gauge, {value = 0 :: number()}).
--record(count, {value = 0 :: integer()}).
--record(dist, {
+-define(DB, pulse).
+
+-define(SUMMARY_ADJUST_RATIO, 1000).
+
+-type counters() :: counters:counters_ref().
+
+-record(tag, {key :: atom(), values :: map()}).
+-record(gauge, {value :: counters()}).
+-record(count, {value :: counters()}).
+-record(summary, {
     base :: number(),
     adjust :: number(),
-    p50 = 0 :: integer(),
-    p90 = 0 :: integer(),
-    p99 = 0 :: integer()
+    quantiles :: counters()
 }).
 
--define(DIST_ADJUST_RATIO, 1000).
+-type type() :: gauge | count | summary.
+-type metric() :: #tag{} | #gauge{} | #count{} | #summary{}.
 
-collect(Db, []) ->
-    Db;
-collect(Db, [Metric = {_, Key, Tags, _} | Rest]) ->
-    Index = {Key, Tags},
-    case Db of
-        #{Index := Current} ->
-            collect(Db#{Index => update(Current, Metric)}, Rest);
-        _ ->
-            collect(Db#{Index => update(new(Metric), Metric)}, Rest)
+-spec new() -> ok.
+new() ->
+    ?DB = ets:new(?DB, [set, public, named_table, {read_concurrency, true}]),
+    ok.
+
+-spec free() -> ok.
+free() ->
+    true = ets:delete(?DB),
+    ok.
+
+-spec write(type(), pulse:key(), number()) -> ok.
+write(Type, Key, Value) ->
+    write(Type, Key, {}, Value).
+
+-spec write(type(), pulse:key(), pulse:tag(), number()) -> ok.
+write(Type, Key, Tag, Value) ->
+    update(Type, Key, Tag, Value, metric(Type, Key, Tag, Value)).
+
+-spec metric(type(), pulse:key(), pulse:tag(), number()) -> metric().
+metric(Type, Key, Tag, Value) ->
+    case ets:lookup(?DB, Key) of
+        [{Key, Metric}] ->
+            Metric;
+        [] ->
+            Metric = new(Type, Tag, Value),
+            case ets:insert_new(?DB, {Key, Metric}) of
+                false ->
+                    [{Key, Metric}] = ets:lookup(?DB, Key),
+                    Metric;
+                _ ->
+                    Metric
+            end
     end.
 
-new({gauge, _, _, _}) -> #gauge{};
-new({count, _, _, _}) -> #count{};
-new({dist, _, _, Value}) -> #dist{base = Value, adjust = Value / ?DIST_ADJUST_RATIO}.
-
-update(Gauge = #gauge{}, {gauge, _, _, Value}) ->
-    Gauge#gauge{value = Value};
-update(Count = #count{value = Current}, {count, _, _, Value}) ->
-    Count#count{value = Current + Value};
-update(
-    Dist = #dist{base = Base, adjust = Adjust, p50 = P50, p90 = P90, p99 = P99},
-    {dist, _, _, Value}
-) ->
-    %% TODO: Allow for dist reset if granularity is too coarse or too fine.
-    Dist#dist{
-        p50 = P50 + update_quantile(0.50, Base + Adjust * P50, Value, rand:uniform()),
-        p90 = P90 + update_quantile(0.90, Base + Adjust * P90, Value, rand:uniform()),
-        p99 = P99 + update_quantile(0.99, Base + Adjust * P99, Value, rand:uniform())
+-spec new(type(), pulse:tag(), number()) -> metric().
+new(Type, {TagKey, TagVal}, Value) ->
+    #tag{key = TagKey, values = #{TagVal => new(Type, {}, Value)}};
+new(gauge, {}, _) ->
+    #gauge{value = counters:new(1, [atomics])};
+new(count, {}, _) ->
+    #count{value = counters:new(1, [write_concurrency])};
+new(summary, {}, Value) ->
+    #summary{
+        base = Value,
+        adjust = Value / ?SUMMARY_ADJUST_RATIO,
+        quantiles = counters:new(3, [write_concurrency])
     }.
 
-update_quantile(Quantile, Estimate, Value, Rand) when Value < Estimate andalso Rand > Quantile ->
-    -1;
-update_quantile(Quantile, Estimate, Value, Rand) when Value > Estimate andalso Rand < Quantile ->
-    +1;
-update_quantile(_, _, _, _) ->
-    0.
+-spec update(type(), pulse:key(), pulse:tag(), number(), metric()) -> ok.
+update(gauge, _Key, {}, Value, #gauge{value = Counter}) when is_integer(Value) ->
+    counters:put(Counter, 1, Value);
+update(count, _Key, {}, Value, #count{value = Counter}) when is_integer(Value) ->
+    counters:add(Counter, 1, Value);
+update(summary, _Key, {}, Value, Summary = #summary{}) ->
+    update_quantile(Summary, 1, 0.50, Value),
+    update_quantile(Summary, 2, 0.90, Value),
+    update_quantile(Summary, 3, 0.99, Value);
+update(Type, Key, {TagKey, TagVal}, Value, Tag = #tag{key = TagKey, values = Map}) ->
+    case Map of
+        #{TagVal := Metric} ->
+            update(Type, Key, {}, Value, Metric);
+        _ ->
+            Metric = new(Type, {}, Value),
+            update(Type, Key, {}, Value, Metric),
+            true = ets:insert(?DB, {Key, Tag#tag{values = Map#{TagVal => Metric}}}),
+            ok
+    end;
+update(Type, Key, Tag, Value, Metric) ->
+    error({pulse, mismatch, {Type, Key, Tag, Value, Metric}}).
 
-report(Db, Prefix) ->
-    [encode(Prefix, Key, Entry) || {Key, Entry} <- Db].
+% TODO: Detect whether adjust is too coarse or fine to reset the
+% counter.
+-spec update_quantile(#summary{}, pos_integer(), float(), number()) -> ok.
+update_quantile(#summary{base = Base, adjust = Adjust, quantiles = Counters}, Ix, Quantile, Value) ->
+    Estimate = Base + Adjust * counters:get(Counters, Ix),
+    case {Value < Estimate, rand:uniform() < Quantile} of
+        {true, false} -> counters:sub(Counters, Ix, 1);
+        {false, true} -> counters:add(Counters, Ix, 1);
+        _ -> ok
+    end.
 
-encode(Prefix, {Key, Tags}, #gauge{value = Value}) ->
-    [encode_key(Prefix, Key, Tags), $\s, encode_num(Value)];
-encode(Prefix, {Key, Tags}, #count{value = Value}) ->
-    [encode_key(Prefix, Key, Tags), $\s, encode_num(Value)];
-encode(Prefix, {Key, Tags}, #dist{base = Base, adjust = Adjust, p50 = P50, p90 = P90, p99 = P99}) ->
-    MakeTags = fun(Quantile) -> pulse:tags([{<<"quantile">>, Quantile}], Tags) end,
+-spec dump(binary()) -> iolist().
+dump(Prefix) ->
+    ets:foldl(fun(Row, Acc) -> encode(Prefix, Row, Acc) end, [], ?DB).
+
+-spec encode(binary(), {pulse:key(), metric()}, iolist()) -> iolist().
+encode(Prefix, {Key, #tag{key = TagKey, values = Map}}, Acc) ->
+    maps:fold(
+        fun(TagVal, Metric, AccInner) ->
+            encode(Prefix, Key, {TagKey, TagVal}, Metric, AccInner)
+        end,
+        Acc,
+        Map
+    );
+encode(Prefix, {Key, Metric}, Acc) ->
+    encode(Prefix, Key, {}, Metric, Acc).
+
+-spec encode(binary(), pulse:key(), pulse:tag(), metric(), iolist()) -> iolist().
+encode(Prefix, Key, Tag, #gauge{value = Counter}, Acc) ->
     [
-        [encode_key(Prefix, Key, MakeTags(<<"0.50">>)), $\s, encode_num(Base + Adjust * P50)],
-        [encode_key(Prefix, Key, MakeTags(<<"0.90">>)), $\s, encode_num(Base + Adjust * P90)],
-        [encode_key(Prefix, Key, MakeTags(<<"0.99">>)), $\s, encode_num(Base + Adjust * P99)]
+        encode_key(Prefix, Key),
+        encode_tags([Tag]),
+        $\s,
+        encode_value(counters:get(Counter, 1)),
+        $\n
+        | Acc
+    ];
+encode(Prefix, Key, Tag, #count{value = Counter}, Acc) ->
+    [
+        encode_key(Prefix, Key),
+        encode_tags([Tag]),
+        $\s,
+        encode_value(counters:get(Counter, 1)),
+        $\n
+        | Acc
+    ];
+encode(Prefix, Key, Tag, Summary = #summary{}, Acc) ->
+    KeyStr = encode_key(Prefix, Key),
+    [
+        encode_quantile(KeyStr, Tag, Summary, 1, 0.5),
+        encode_quantile(KeyStr, Tag, Summary, 2, 0.9),
+        encode_quantile(KeyStr, Tag, Summary, 3, 0.99)
+        | Acc
     ].
 
-encode_key(Prefix, Key, Tags) when is_atom(Key) ->
-    encode_key(Prefix, atom_to_binary(Key, utf8), Tags);
-encode_key(Prefix, Key, Tags) ->
-    <<Prefix/binary, Key/binary, ${, Tags/binary, $}>>.
+-spec encode_quantile(iolist(), pulse:tag(), #summary{}, pos_integer(), float()) -> iolist().
+encode_quantile(
+    KeyStr,
+    Tag,
+    #summary{base = Base, adjust = Adjust, quantiles = Counters},
+    Ix,
+    Quantile
+) ->
+    [
+        KeyStr,
+        encode_tags([{quantile, Quantile}, Tag]),
+        $\s,
+        encode_value(Base + Adjust * counters:get(Counters, Ix)),
+        $\n
+    ].
 
-encode_num(Value) when is_float(Value) ->
-    list_to_binary(float_to_list(Value));
-encode_num(Value) when is_integer(Value) ->
-    list_to_binary(integer_to_list(Value)).
+-spec encode_key(binary(), pulse:key()) -> iolist().
+encode_key(Prefix, Key) -> [Prefix, $_, atom_to_binary(Key, utf8)].
+
+-spec encode_tags([pulse:tag()]) -> iolist().
+encode_tags(Tags) -> [${, encode_tags(Tags, []), $}].
+
+-spec encode_tags([pulse:tag()], iolist()) -> iolist().
+encode_tags([], Acc) -> Acc;
+encode_tags([{} | Rest], Acc) -> encode_tags(Rest, Acc);
+encode_tags([{Key, Val} | Rest], []) -> encode_tags(Rest, [encode_tag(Key, Val)]);
+encode_tags([{Key, Val} | Rest], Acc) -> encode_tags(Rest, [encode_tag(Key, Val), $, | Acc]).
+
+-spec encode_tag(pulse:tag_key(), pulse:tag_val()) -> iolist().
+encode_tag(Key, Val) -> [atom_to_binary(Key, utf8), $=, $", encode_tag_value(Val), $"].
+
+-spec encode_tag_value(pulse:tag_val()) -> iodata().
+encode_tag_value(Val) when is_binary(Val) -> Val;
+encode_tag_value(Val) when is_atom(Val) -> atom_to_binary(Val, utf8);
+%% GRADUALIZER: false positive (kinda) on char() != byte() for iolist().
+encode_tag_value(Val) when is_number(Val) -> io_lib:format("~p", [Val]).
+
+%% GRADUALIZER: false positive (kinda) on char() != byte() for iolist().
+-spec encode_value(number()) -> iolist().
+encode_value(Value) -> io_lib:format("~p", [Value]).

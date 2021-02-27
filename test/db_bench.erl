@@ -4,46 +4,51 @@
 
 -define(RUNS, 1000).
 
-rand_test() ->
-    Fn = fun() -> rand_key(gauge) end,
-    report(rand, timing:function(Fn, ?RUNS, 1)).
+write(Type, N, P) ->
+    pulse_db:new(),
+    try
+        [pulse_db:write(Type, rand_key(Type), 1) || _ <- lists:seq(0, N)],
+        Fn = fun() -> [pulse_db:write(Type, key, 1) || _ <- lists:seq(0, 100)] end,
+        Fn(),
+        report(#{name => write, type => Type, size => N, procs => P}, timing:function(Fn, ?RUNS, P))
+    after
+        pulse_db:free()
+    end.
 
-collect_gauge(N) ->
-    Metrics = [rand_metric(gauge) || _ <- lists:seq(0, N)],
-    Db = pulse_db:collect(#{}, Metrics),
-    Fn = fun() -> pulse_db:collect(Db, Metrics) end,
-    report({gauge, N}, timing:function(Fn, ?RUNS, 1)).
+write_test() ->
+    [
+        write(Type, N, P)
+        || Type <- [gauge, count, summary], N <- [1, 10, 100, 200, 500], P <- [1, 2, 4, 8]
+    ].
 
-collect_gauge_test() ->
-    [collect_gauge(N) || N <- [1, 10, 100, 200, 500]].
+write_tags(Type, N, P) ->
+    pulse_db:new(),
+    try
+        [pulse_db:write(Type, rand_key(Type), rand_tag(tag, N), 1) || _ <- lists:seq(0, 100 * N)],
+        Tag = rand_tag(tag, N),
+        Fn = fun() -> [pulse_db:write(Type, key, Tag, 1) || _ <- lists:seq(0, 100)] end,
+        Fn(),
+        report(#{name => tags, type => Type, size => N, procs => P}, timing:function(Fn, ?RUNS, P))
+    after
+        pulse_db:free()
+    end.
 
-collect_dist(N) ->
-    Metrics = [rand_metric(dist) || _ <- lists:seq(0, N)],
-    Db = pulse_db:collect(#{}, Metrics),
-    Fn = fun() -> pulse_db:collect(Db, Metrics) end,
-    report({dist, N}, timing:function(Fn, ?RUNS, 1)).
-
-collect_dist_test() ->
-    [collect_dist(N) || N <- [1, 10, 100, 200, 500]].
-
-collect_mix_test() ->
-    Metrics = lists:flatten([
-        [rand_metric(count) || _ <- lists:seq(0, 200)],
-        [rand_metric(dist) || _ <- lists:seq(0, 50)]
-    ]),
-    Db = pulse_db:collect(#{}, Metrics),
-    Fn = fun() -> pulse_db:collect(Db, Metrics) end,
-    report({mix, 200, 50}, timing:function(Fn, ?RUNS, 1)).
+write_tags_test() ->
+    [
+        write_tags(Type, N, P)
+        || Type <- [gauge, count, summary], N <- [1, 10, 100], P <- [1, 2, 4, 8]
+    ].
 
 rand_key(Type) ->
-    Suffix = erlang:integer_to_list(rand:uniform(100000)),
-    Prefix = erlang:atom_to_list(Type),
-    erlang:list_to_atom(lists:flatten([Suffix, "_", Prefix])).
+    rand_atom(Type, 100000).
 
-rand_metric(Type) ->
-    {Type, rand_key(Type), pulse:tags(), rand:uniform(100)}.
+rand_tag(Key, N) ->
+    {Key, rand_atom(val, N)}.
+
+rand_atom(Name, N) ->
+    Suffix = erlang:integer_to_list(rand:uniform(N)),
+    Prefix = erlang:atom_to_list(Name),
+    erlang:list_to_atom(lists:flatten([Prefix, "_", Suffix])).
 
 report(Id, Result) ->
-    Keys = [min, max, percentile],
-    Map = maps:from_list(lists:filter(fun({K, _}) -> lists:member(K, Keys) end, Result)),
-    erlang:display({Id, Map}).
+    erlang:display({Id, lists:keyfind(percentile, 1, Result)}).

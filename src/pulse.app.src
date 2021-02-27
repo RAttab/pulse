@@ -1,9 +1,10 @@
 {application, pulse,
  [
-  {description, "I like rainbows"},
-  {vsn, "0.0.0"},
-  {registered, []},
+  {mod, {pulse, []}},
+  {description, "metrics gathering library"},
+  {vsn, git},
+  {registered, [pulse_sup]},
+  {modules, [pulse, pulse_sup, pulse_db]},
   {applications, [kernel, stdlib]},
-  {modules, [pulse]},
   {env, []}
  ]}.
