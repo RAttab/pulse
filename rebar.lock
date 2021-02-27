@@ -1,0 +1,12 @@
+[{<<"bear">>,
+  {git,"https://github.com/boundary/bear.git",
+       {ref,"119234548783af19b8ec75c879c5062676b92571"}},
+  1},
+ {<<"hdr_histogram_erl">>,
+  {git,"https://github.com/HdrHistogram/hdr_histogram_erl.git",
+       {ref,"075798518aabd73a0037007989cde8bd6923b4d9"}},
+  1},
+ {<<"timing">>,
+  {git,"https://github.com/lpgauth/timing.git",
+       {ref,"e91214f53254c28e1c6a9664f152d49f6d81c8b3"}},
+  0}].
