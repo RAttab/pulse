@@ -1,6 +1,13 @@
 -module(pulse).
 
--export([gauge/2, gauge/3, count/2, count/3, summarize/2, summarize/3, dump/1]).
+-export([
+    gauge/2, gauge/3,
+    count/2, count/3,
+    summarize/2, summarize/3,
+    now_us/0,
+    summarize_since_us/2, summarize_since_us/3,
+    dump/1
+]).
 
 -export_type([key/0, tag_key/0, tag_val/0, tag/0]).
 
@@ -30,6 +37,17 @@ summarize(Key, Value) -> pulse_db:write(summary, Key, Value).
 
 -spec summarize(key(), tag(), number()) -> ok.
 summarize(Key, Tag, Value) -> pulse_db:write(summary, Key, Tag, Value).
+
+-spec now_us() -> erlang:timestamp().
+now_us() -> os:timestamp().
+
+-spec summarize_since_us(key(), erlang:timestamp()) -> ok.
+summarize_since_us(Key, T0) ->
+    summarize(Key, timer:now_diff(now_us(), T0)).
+
+-spec summarize_since_us(key(), tag(), erlang:timestamp()) -> ok.
+summarize_since_us(Key, Tag, T0) ->
+    summarize(Key, Tag, timer:now_diff(now_us(), T0)).
 
 -spec dump(binary()) -> iolist().
 dump(Prefix) -> pulse_db:dump(Prefix).
