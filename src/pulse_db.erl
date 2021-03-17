@@ -47,8 +47,8 @@ metric(Type, Key, Tag, Value) ->
             Metric = new(Type, Tag, Value),
             case ets:insert_new(?DB, {Key, Metric}) of
                 false ->
-                    [{Key, Metric}] = ets:lookup(?DB, Key),
-                    Metric;
+                    [{Key, NewMetric}] = ets:lookup(?DB, Key),
+                    NewMetric;
                 _ ->
                     Metric
             end
